@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>เกม AR พลังฝ่ามือเติมคำ</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- โหลด MediaPipe สำหรับตรวจจับมือ -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Mitr:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Mitr', sans-serif;
+            margin: 0;
+            overflow: hidden;
+            background-color: #000;
+        }
+        #canvas-container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        canvas {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+            box-shadow: 0 0 20px rgba(255,255,255,0.2);
+        }
+        #videoElement {
+            display: none; /* ซ่อนวิดีโอ เพื่อไม่ให้เห็นหน้าผู้เล่น */
+        }
+        #loading {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.8);
+            color: white;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 10;
+        }
+        .spinner {
+            border: 8px solid #f3f3f3;
+            border-top: 8px solid #3498db;
+            border-radius: 50%;
+            width: 60px;
+            height: 60px;
+            animation: spin 1s linear infinite;
+            margin-bottom: 20px;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+
+    <div id="loading">
+        <div class="spinner"></div>
+        <h2 class="text-3xl font-bold mb-2 text-blue-400">กำลังโหลดระบบ AR...</h2>
+        <p class="text-xl">กรุณาอนุญาตการเข้าถึงกล้อง และรอสักครู่</p>
+    </div>
+
+    <div id="canvas-container">
+        <video id="videoElement" autoplay playsinline></video>
+        <canvas id="gameCanvas" width="1920" height="1080"></canvas>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const videoElement = document.getElementById('videoElement');
+        const loadingElement = document.getElementById('loading');
+
+        // โหลดภาพพื้นหลังใหม่ที่ระบุ
+        const bgImage = new Image();
+        bgImage.src = 'https://i.postimg.cc/XNBTVJpL/Chat-GPT-Image-28-k-y-2569-21-09-57.png';
+        
+        // ข้อมูลคำศัพท์ให้เลือก (แถวบน)
+        const words = [
+            { text: "หยุด", active: true },
+            { text: "เลือก", active: true },
+            { text: "ช่วย", active: true },
+            { text: "ปลอดภัย", active: true },
+            { text: "ครู", active: true }
+        ];
+
+        // กำหนดตำแหน่งและขนาดของปุ่มคำศัพท์ ชิดขอบบน แถวเดียว
+        const choiceBoxes = [];
+        const topMargin = 40; 
+        const boxWidth = 340; // กรอบข้อความขนาดใหญ่ขึ้นอีก
+        const boxHeight = 150;
+        
+        // ขยับไปทางซ้ายและปรับระยะห่างให้พอดีหน้าจอ
+        const gapChoices = 35; 
+        const startXChoices = 40; // ปรับให้ตัวหนังสือขยับไปทางซ้ายมากขึ้น
+
+        for (let i = 0; i < words.length; i++) {
+            choiceBoxes.push({
+                x: startXChoices + (boxWidth + gapChoices) * i,
+                y: topMargin,
+                w: boxWidth,
+                h: boxHeight,
+                word: words[i],
+                hoverTime: 0, 
+                errorTime: 0  
+            });
+        }
+
+        // โครงสร้างประโยค 3 บรรทัดและช่องว่างตามที่ระบุอย่างเคร่งครัด
+        // พี่แปลกหน้าให้ขนมเรา [หยุด] คิดและ [เลือก] ไม่รับ
+        // เราปฏิเสธและรีบไปบอกครู [ช่วย] ด้วยนะคะ
+        // เรา [ปลอดภัย] เพราะมี [ครู] คอยดูแล
+        const sentences = [
+            { textParts: ["พี่แปลกหน้าให้ขนมเรา", "คิดและ", "ไม่รับ"], blanks: ["", ""] },
+            { textParts: ["เราปฏิเสธและรีบไปบอกครู", "ด้วยนะคะ"], blanks: [""] },
+            { textParts: ["เรา", "เพราะมี", "คอยดูแล"], blanks: ["", ""] } 
+        ];
+
+        // กำหนดคำตอบที่ถูกต้องตามลำดับที่เจาะจง ห้ามผิด
+        const allBlanks = [
+            { text: "", correct: "หยุด" },      
+            { text: "", correct: "เลือก" },     
+            { text: "", correct: "ช่วย" },      
+            { text: "", correct: "ปลอดภัย" }, 
+            { text: "", correct: "ครู" }        
+        ];
+        
+        let currentBlankStep = 0; // ลำดับช่องว่างที่กำลังรอเติม
+        
+        let palmPosition = null;
+        const maxHoverTime = 40; // จำนวนเฟรมที่ต้องวางมือค้างไว้เพื่อเลือกคำ 
+        let particles = [];
+
+        function drawRoundedRect(x, y, w, h, radius, fillStyle, strokeStyle, lineWidth = 4) {
+            ctx.beginPath();
+            ctx.moveTo(x + radius, y);
+            ctx.lineTo(x + w - radius, y);
+            ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
+            ctx.lineTo(x + w, y + h - radius);
+            ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
+            ctx.lineTo(x + radius, y + h);
+            ctx.quadraticCurveTo(x, y + h, x, y + h - radius);
+            ctx.lineTo(x, y + radius);
+            ctx.quadraticCurveTo(x, y, x + radius, y);
+            ctx.closePath();
+            
+            if (fillStyle) {
+                ctx.fillStyle = fillStyle;
+                ctx.fill();
+            }
+            if (strokeStyle) {
+                ctx.lineWidth = lineWidth;
+                ctx.strokeStyle = strokeStyle;
+                ctx.stroke();
+            }
+        }
+
+        function drawTextWithOutline(text, x, y, fillStyle, fontSize, align = "left", outline = true) {
+            ctx.font = `600 ${fontSize}px 'Mitr'`;
+            ctx.textAlign = align;
+            ctx.textBaseline = "middle";
+            
+            if (outline) {
+                ctx.lineWidth = Math.max(2, fontSize / 12); // ปรับขนาดเส้นขอบตามขนาดอักษร
+                ctx.strokeStyle = "black";
+                ctx.strokeText(text, x, y);
+            }
+            
+            ctx.fillStyle = fillStyle;
+            ctx.fillText(text, x, y);
+        }
+
+        function createParticles(x, y, specificColor = null) {
+            for(let i=0; i<3; i++) {
+                particles.push({
+                    x: x,
+                    y: y,
+                    vx: (Math.random() - 0.5) * 12,
+                    vy: (Math.random() - 0.5) * 12,
+                    life: 1.0,
+                    size: Math.random() * 15 + 5,
+                    color: specificColor ? specificColor : `hsl(${180 + Math.random()*60}, 100%, 70%)` 
+                });
+            }
+        }
+
+        function drawAndUpdateParticles() {
+            for (let i = particles.length - 1; i >= 0; i--) {
+                let p = particles[i];
+                p.x += p.vx;
+                p.y += p.vy;
+                p.life -= 0.03;
+                
+                if (p.life <= 0) {
+                    particles.splice(i, 1);
+                    continue;
+                }
+                
+                ctx.globalAlpha = p.life;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+                ctx.fillStyle = p.color;
+                ctx.fill();
+            }
+            ctx.globalAlpha = 1.0;
+        }
+
+        function renderGame() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // วาดพื้นหลัง สีสดใส ชัดเจน
+            if (bgImage.complete) {
+                ctx.drawImage(bgImage, 0, 0, canvas.width, canvas.height);
+                // ลดความทึบของ overlay ลงอีก เพื่อให้สีชัดและสดใสขึ้น
+                ctx.fillStyle = "rgba(0,0,0, 0.05)"; 
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+            } else {
+                ctx.fillStyle = "#1a202c";
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+            }
+
+            // วาดตัวเลือกคำศัพท์ด้านบน
+            choiceBoxes.forEach((box, index) => {
+                if (!box.word.active) return; 
+
+                let isHovering = false;
+                
+                // ตรวจจับมือชี้ตัวเลือก
+                if (palmPosition) {
+                    if (palmPosition.x > box.x && palmPosition.x < box.x + box.w &&
+                        palmPosition.y > box.y && palmPosition.y < box.y + box.h) {
+                        isHovering = true;
+                        
+                        if (box.errorTime === 0) {
+                            box.hoverTime++;
+                        }
+                        
+                        // แอนิเมชันชาร์จพลัง
+                        if(box.hoverTime > 0) {
+                             ctx.beginPath();
+                             ctx.arc(box.x + box.w/2, box.y + box.h/2, box.w/2 + 20, 0, Math.PI * 2 * (box.hoverTime / maxHoverTime));
+                             ctx.strokeStyle = "#00FFFF";
+                             ctx.lineWidth = 10;
+                             ctx.stroke();
+                        }
+
+                        // ยืนยันการเลือก
+                        if (box.hoverTime >= maxHoverTime && currentBlankStep < allBlanks.length) {
+                            if (box.word.text === allBlanks[currentBlankStep].correct) {
+                                // ตอบถูก
+                                allBlanks[currentBlankStep].text = box.word.text;
+                                box.word.active = false; // ซ่อนคำนี้
+                                currentBlankStep++;
+                                box.hoverTime = 0;
+                                for(let k=0; k<20; k++) createParticles(box.x + box.w/2, box.y + box.h/2, "#4CAF50");
+                            } else {
+                                // ตอบผิด
+                                box.errorTime = 40; 
+                                box.hoverTime = 0;
+                                for(let k=0; k<15; k++) createParticles(box.x + box.w/2, box.y + box.h/2, "#F44336");
+                            }
+                        }
+                    } else {
+                        box.hoverTime = Math.max(0, box.hoverTime - 2); 
+                    }
+                }
+
+                // สีของกล่องคำ
+                let boxColor = "#4FC3F7";
+                if (box.errorTime > 0) {
+                    boxColor = "#EF5350"; 
+                    box.errorTime--;
+                } else if (isHovering) {
+                    boxColor = "#FFF176"; 
+                }
+                
+                drawRoundedRect(box.x, box.y, box.w, box.h, 20, boxColor, "#FFFFFF", 6);
+                drawTextWithOutline(box.word.text, box.x + box.w/2, box.y + box.h/2, "#000", 76, "center", false); 
+            });
+
+            // วาดประโยคด้านล่างซ้าย 
+            const startX = 40; // ชิดซ้าย
+            const startY = canvas.height - 380; // ปรับตำแหน่งให้อยู่ในระยะ 3 บรรทัด
+            const lineSpacing = 150; // เพิ่มช่องว่างระหว่างบรรทัด
+            const fontSize = 64; // เพิ่มขนาดตัวอักษรตามที่ต้องการ
+            const blankWidth = 280; // ขยายขนาดช่องว่างให้กว้างขึ้น
+            const horizontalGap = 55; // กระจายตามแนวนอนให้กว้างขึ้นอีก
+            
+            ctx.font = `600 ${fontSize}px 'Mitr'`;
+            
+            let globalBlankTracker = 0;
+
+            sentences.forEach((sentence, sIndex) => {
+                let currentX = startX;
+                let currentY = startY + (sIndex * lineSpacing);
+
+                for (let i = 0; i < sentence.textParts.length; i++) {
+                    let text = sentence.textParts[i];
+                    drawTextWithOutline(text, currentX, currentY, "#FFFFFF", fontSize, "left");
+                    currentX += ctx.measureText(text).width + horizontalGap;
+
+                    if (i < sentence.blanks.length) {
+                        let blankInfo = allBlanks[globalBlankTracker];
+                        let isCurrentTarget = (globalBlankTracker === currentBlankStep);
+                        
+                        let bgColor = isCurrentTarget ? "rgba(255, 255, 0, 0.4)" : "rgba(255, 255, 255, 0.2)";
+                        let strokeColor = isCurrentTarget ? "#FFEB3B" : "#FFFFFF";
+                        
+                        if (isCurrentTarget) {
+                            strokeColor = (Math.floor(Date.now() / 250) % 2 === 0) ? "#FFEB3B" : "#FF9800";
+                        }
+
+                        // วาดกรอบช่องว่าง
+                        drawRoundedRect(currentX, currentY - fontSize/2 - 10, blankWidth, fontSize + 20, 10, bgColor, strokeColor, 3);
+
+                        // วาดคำตอบที่ถูกเติมแล้ว
+                        if (blankInfo.text !== "") {
+                            drawTextWithOutline(blankInfo.text, currentX + blankWidth/2, currentY, "#4CAF50", fontSize + 6, "center");
+                        }
+
+                        currentX += blankWidth + horizontalGap;
+                        globalBlankTracker++;
+                    }
+                }
+            });
+
+            if (palmPosition) {
+                createParticles(palmPosition.x, palmPosition.y);
+                drawAndUpdateParticles();
+
+                // แกนพลังฝ่ามือ
+                let gradient = ctx.createRadialGradient(palmPosition.x, palmPosition.y, 10, palmPosition.x, palmPosition.y, 70);
+                gradient.addColorStop(0, "rgba(255, 255, 255, 1)");
+                gradient.addColorStop(0.3, "rgba(0, 255, 255, 0.9)");
+                gradient.addColorStop(1, "rgba(0, 255, 255, 0)");
+
+                ctx.beginPath();
+                ctx.arc(palmPosition.x, palmPosition.y, 70, 0, Math.PI * 2);
+                ctx.fillStyle = gradient;
+                ctx.fill();
+            } else {
+                drawAndUpdateParticles(); 
+            }
+
+            // ชนะเกม
+            if (currentBlankStep >= allBlanks.length) {
+                ctx.fillStyle = "rgba(0, 0, 0, 0.85)";
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                drawTextWithOutline("เยี่ยมมาก! คุณเรียนรู้วิธีป้องกันตัวเองได้ดีเยี่ยม", canvas.width/2, canvas.height/2, "#4CAF50", 72, "center");
+            }
+
+            requestAnimationFrame(renderGame);
+        }
+
+        function onResults(results) {
+            if (loadingElement.style.display !== 'none') {
+                loadingElement.style.display = 'none';
+            }
+
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const landmarks = results.multiHandLandmarks[0];
+                const x = (1 - landmarks[9].x) * canvas.width; 
+                const y = landmarks[9].y * canvas.height;
+                
+                if (palmPosition === null) {
+                    palmPosition = { x, y };
+                } else {
+                    palmPosition.x += (x - palmPosition.x) * 0.5;
+                    palmPosition.y += (y - palmPosition.y) * 0.5;
+                }
+            } else {
+                palmPosition = null;
+            }
+        }
+
+        const hands = new Hands({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+        }});
+
+        hands.setOptions({
+            maxNumHands: 1, 
+            modelComplexity: 1,
+            minDetectionConfidence: 0.6,
+            minTrackingConfidence: 0.6
+        });
+        hands.onResults(onResults);
+
+        const camera = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({image: videoElement});
+            },
+            width: 1280,
+            height: 720
+        });
+        camera.start();
+
+        bgImage.onload = () => {
+             requestAnimationFrame(renderGame);
+        };
+        setTimeout(() => {
+            requestAnimationFrame(renderGame);
+        }, 1000);
+
+    </script>
+</body>
+</html>
